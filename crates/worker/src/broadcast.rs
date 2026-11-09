@@ -22,6 +22,11 @@ pub struct Providers {
 }
 
 impl Providers {
+    /// Same resolution as `for_name`, exposed for other job handlers.
+    pub fn for_name_pub(&self, name: &str) -> Arc<dyn WaProvider> {
+        self.for_name(name)
+    }
+
     fn for_name(&self, name: &str) -> Arc<dyn WaProvider> {
         match name {
             "meta_cloud" => self.meta.clone(),

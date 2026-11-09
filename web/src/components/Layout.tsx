@@ -1,14 +1,21 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { api, currentOrgId, setCurrentOrgId } from "../api";
+import { useTheme } from "./theme";
 import type { Session } from "../App";
 
 const NAV = [
   { to: "/app", label: "Ringkasan", end: true },
   { to: "/app/inbox", label: "Inbox" },
-  { to: "/app/nomor", label: "Nomor WhatsApp" },
+  { to: "/app/kontak", label: "Contacts" },
+  { to: "/app/template", label: "Templates" },
   { to: "/app/broadcast", label: "Broadcast" },
+  { to: "/app/analytics", label: "Analytics" },
+  { to: "/app/ai-agent", label: "AI Agent" },
+  { to: "/app/ads", label: "Ads" },
+  { to: "/app/nomor", label: "Nomor WhatsApp" },
   { to: "/app/api-keys", label: "API Keys" },
   { to: "/app/webhooks", label: "Webhooks" },
+  { to: "/app/konfigurasi", label: "Konfigurasi" },
   { to: "/app/tagihan", label: "Paket & Tagihan" },
 ];
 
@@ -20,6 +27,7 @@ export function Layout({
   onSwitchOrg: () => void;
 }) {
   const navigate = useNavigate();
+  const [theme, toggleTheme] = useTheme();
   const orgId = currentOrgId();
   const org = session.organizations.find((o) => o.id === orgId);
 
@@ -32,7 +40,7 @@ export function Layout({
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div>
+        <div className="sidebar-nav">
           <div className="brand">
             M<span>MS</span>
           </div>
@@ -50,7 +58,7 @@ export function Layout({
           ))}
         </div>
 
-        <div style={{ marginTop: "auto", paddingTop: "1rem" }}>
+        <div className="sidebar-foot">
           {session.organizations.length > 1 && (
             <select
               className="select"
@@ -60,7 +68,7 @@ export function Layout({
                 onSwitchOrg();
                 navigate("/app");
               }}
-              style={{ marginBottom: "0.5rem", fontSize: "0.85rem" }}
+              style={{ fontSize: "0.85rem" }}
             >
               {session.organizations.map((o) => (
                 <option key={o.id} value={o.id}>
@@ -69,7 +77,7 @@ export function Layout({
               ))}
             </select>
           )}
-          <div className="faint" style={{ fontSize: "0.78rem", padding: "0 0.65rem" }}>
+          <div className="faint sidebar-who">
             {session.user.email}
             {org && (
               <>
@@ -78,13 +86,23 @@ export function Layout({
               </>
             )}
           </div>
-          <button
-            className="btn btn-sm"
-            onClick={logout}
-            style={{ marginTop: "0.5rem", width: "100%" }}
-          >
-            Keluar
-          </button>
+          <div className="row" style={{ gap: "0.4rem" }}>
+            <button
+              className="btn btn-sm sidebar-logout"
+              onClick={logout}
+              style={{ flex: 1 }}
+            >
+              Keluar
+            </button>
+            <button
+              className="btn btn-sm"
+              onClick={toggleTheme}
+              title={theme === "dark" ? "Mode terang" : "Mode gelap"}
+              aria-label="Ganti tema"
+            >
+              {theme === "dark" ? "☀" : "☾"}
+            </button>
+          </div>
         </div>
       </aside>
 

@@ -4,7 +4,10 @@
 //! pruning. Safe to run several instances: jobs are claimed with
 //! `FOR UPDATE SKIP LOCKED`.
 
+mod ai_reply;
 mod broadcast;
+mod claude;
+mod lead_event;
 mod webhook;
 
 use mms_core::jobs::{self, Job};
@@ -45,11 +48,22 @@ async fn main() -> anyhow::Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
+    let claude = cfg.anthropic_api_key.clone().map(|key| {
+        Arc::new(crate::claude::Claude::new(
+            key,
+            cfg.anthropic_api_base.clone(),
+        ))
+    });
+    if claude.is_none() {
+        tracing::warn!("ANTHROPIC_API_KEY not set — AI agent replies are disabled");
+    }
+
     let providers = Arc::new(Providers {
-        meta: Arc::from(mms_provider::build(
+        meta: Arc::from(mms_provider::build_with(
             "meta_cloud",
             &cfg.meta_api_base,
             &cfg.meta_api_version,
+            cfg.meta_conversions_path.clone(),
         )),
         mock: Arc::from(mms_provider::build("mock", "", "")),
     });
@@ -99,11 +113,12 @@ async fn main() -> anyhow::Result<()> {
             let pool = pool.clone();
             let http = http.clone();
             let providers = providers.clone();
+            let claude = claude.clone();
             let cfg = cfg.clone();
             handles.push(tokio::spawn(async move {
                 let id = job.id;
                 let kind = job.kind.clone();
-                match handle(&pool, &http, &providers, &cfg, &job).await {
+                match handle(&pool, &http, &providers, &claude, &cfg, &job).await {
                     Ok(()) => {
                         if let Err(e) = jobs::complete(&pool, id).await {
                             tracing::error!(error = %e, job = id, "could not mark job done");
@@ -128,6 +143,7 @@ async fn handle(
     pool: &mms_core::PgPool,
     http: &reqwest::Client,
     providers: &Providers,
+    claude: &Option<Arc<crate::claude::Claude>>,
     cfg: &Config,
     job: &Job,
 ) -> mms_core::Result<()> {
@@ -139,6 +155,27 @@ async fn handle(
         jobs::KIND_BROADCAST_RUN => {
             let id = uuid_field(job, "broadcast_id")?;
             broadcast::run(pool, providers, &cfg.encryption_key, id).await
+        }
+        jobs::KIND_AI_REPLY => {
+            let conversation_id = uuid_field(job, "conversation_id")?;
+            let message_id = uuid_field(job, "message_id")?;
+            let agent_id = uuid_field(job, "agent_id")?;
+            ai_reply::run(
+                ai_reply::Ctx {
+                    pool,
+                    providers,
+                    claude: claude.as_deref(),
+                    enc_key: &cfg.encryption_key,
+                },
+                conversation_id,
+                message_id,
+                agent_id,
+            )
+            .await
+        }
+        jobs::KIND_META_LEAD_EVENT => {
+            let id = uuid_field(job, "event_id")?;
+            lead_event::dispatch(pool, providers, &cfg.encryption_key, id).await
         }
         jobs::KIND_RETENTION_PRUNE => {
             let org_id = job

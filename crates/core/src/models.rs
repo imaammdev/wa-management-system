@@ -104,11 +104,16 @@ pub struct Conversation {
     pub wa_account_id: Uuid,
     pub contact_id: Uuid,
     pub status: String,
+    pub priority: String,
     pub assigned_to: Option<Uuid>,
     pub assigned_team_id: Option<Uuid>,
     pub stage_id: Option<Uuid>,
+    /// Denormalized from the newest message; drives the "belum dibalas" filter.
+    pub last_message_direction: Option<String>,
     pub service_window_expires_at: Option<DateTime<Utc>>,
     pub ai_agent_enabled: bool,
+    /// A live Kichat room lets us reply outside Meta's 24-hour window.
+    pub kichat_active: bool,
     pub unread_count: i32,
     pub last_message_at: Option<DateTime<Utc>>,
     pub last_message_preview: Option<String>,
@@ -270,4 +275,63 @@ pub struct MetaRate {
 pub struct UsageRow {
     pub metric: String,
     pub value: i64,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Activity {
+    pub id: i64,
+    pub conversation_id: Option<Uuid>,
+    pub contact_id: Option<Uuid>,
+    pub actor_user_id: Option<Uuid>,
+    pub actor_name: Option<String>,
+    pub kind: String,
+    pub summary: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Deal {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub contact_id: Uuid,
+    pub pipeline_id: Option<Uuid>,
+    pub stage_id: Option<Uuid>,
+    pub stage_name: Option<String>,
+    pub title: String,
+    pub value_idr: i64,
+    pub status: String,
+    pub owner_id: Option<Uuid>,
+    pub expected_close_at: Option<NaiveDate>,
+    pub lost_reason: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct MetaLeadEvent {
+    pub id: Uuid,
+    pub contact_id: Uuid,
+    pub event_name: String,
+    pub status: String,
+    pub provider_ref: Option<String>,
+    pub error: Option<String>,
+    pub sent_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct Note {
+    pub id: Uuid,
+    pub conversation_id: Uuid,
+    pub author_id: Option<Uuid>,
+    pub author_name: Option<String>,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct CannedResponse {
+    pub id: Uuid,
+    pub shortcut: String,
+    pub body: String,
 }

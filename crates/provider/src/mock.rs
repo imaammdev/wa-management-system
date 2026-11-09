@@ -171,6 +171,16 @@ impl WaProvider for MockProvider {
         Ok(format!("https://mock.local/media/{media_id}"))
     }
 
+    async fn report_lead_event(
+        &self,
+        _creds: &ProviderCreds,
+        event_name: &str,
+        _payload: &serde_json::Value,
+    ) -> Result<String> {
+        tracing::info!(event_name, "mock provider accepted lead event");
+        Ok(format!("mock_evt_{}", Uuid::new_v4().simple()))
+    }
+
     async fn phone_number_info(&self, _creds: &ProviderCreds) -> Result<PhoneNumberInfo> {
         Ok(PhoneNumberInfo {
             display_phone_number: Some("+62 800-0000-0000".into()),

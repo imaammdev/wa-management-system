@@ -56,10 +56,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         pool,
-        meta: Arc::from(mms_provider::build(
+        meta: Arc::from(mms_provider::build_with(
             "meta_cloud",
             &cfg.meta_api_base,
             &cfg.meta_api_version,
+            cfg.meta_conversions_path.clone(),
         )),
         mock: Arc::from(mms_provider::build("mock", "", "")),
         limiter,
@@ -102,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/whatsapp-accounts", routes::wa_accounts::router())
         .nest("/api/inbox", routes::inbox::router())
         .nest("/api/contacts", routes::contacts::router())
+        .nest("/api/crm", routes::crm::router())
+        .nest("/api/analytics", routes::analytics::router())
+        .nest("/api/ai", routes::ai::router())
+        .nest("/api/ads", routes::ads::router())
+        .nest("/api/kichat", routes::kichat::router())
+        // Public, token-authenticated customer chat room.
+        .nest("/kichat", routes::kichat::public_router())
+        .nest("/api/settings", routes::settings::router())
         .nest("/api/templates", routes::templates::router())
         .nest("/api/broadcasts", routes::broadcasts::router())
         .nest("/api/webhooks", routes::webhooks::router())

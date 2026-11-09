@@ -109,17 +109,101 @@ export type WaAccount = {
   waba_id: string | null;
 };
 
+export type Label = { id: string; name: string; color: string };
+
+export type Contact = {
+  id: string;
+  wa_id: string;
+  name: string | null;
+  profile_name: string | null;
+  email: string | null;
+  attributes: Record<string, unknown>;
+  opt_in_status: string;
+  last_seen_at: string | null;
+  created_at: string;
+};
+
 export type Conversation = {
   id: string;
   status: string;
+  priority: "urgent" | "high" | "medium" | "low";
   assigned_to: string | null;
+  assignee_name: string | null;
   wa_account_id: string;
   contact: { wa_id: string; name: string | null };
+  labels: Label[];
   last_message_at: string | null;
   last_message_preview: string | null;
+  last_message_direction: "inbound" | "outbound" | null;
+  awaiting_reply: boolean;
   unread_count: number;
   service_window_open: boolean;
 };
+
+export type InboxCounts = {
+  total: number;
+  unread: number;
+  awaiting: number;
+  open: number;
+  pending: number;
+  held: number;
+  closed: number;
+  urgent: number;
+  mine: number;
+  unassigned: number;
+};
+
+export type Member = { id: string; name: string; email: string; role: string };
+
+export type Activity = {
+  id: number;
+  kind: string;
+  summary: string;
+  actor_name: string | null;
+  created_at: string;
+};
+
+export type Note = {
+  id: string;
+  body: string;
+  author_name: string | null;
+  created_at: string;
+};
+
+export type Deal = {
+  id: string;
+  title: string;
+  value_idr: number;
+  status: "open" | "won" | "lost";
+  stage_name: string | null;
+  expected_close_at: string | null;
+  created_at: string;
+};
+
+export type MetaEvent = {
+  id: string;
+  event_name: string;
+  status: "pending" | "sent" | "failed";
+  error: string | null;
+  sent_at: string | null;
+  created_at: string;
+};
+
+export type ContactPanel = {
+  id: string;
+  wa_id: string;
+  name: string | null;
+  profile_name: string | null;
+  email: string | null;
+  opt_in_status: string;
+  last_seen_at: string | null;
+  created_at: string;
+  labels: Label[];
+  deals: Deal[];
+  meta_events: MetaEvent[];
+};
+
+export type CannedResponse = { id: string; shortcut: string; body: string };
 
 export type Message = {
   id: string;
@@ -127,6 +211,7 @@ export type Message = {
   msg_type: string;
   body: string | null;
   status: string;
+  source: string;
   error_detail: string | null;
   created_at: string;
 };
@@ -186,3 +271,54 @@ export const waktu = (iso: string | null) =>
         timeStyle: "short",
       }).format(new Date(iso))
     : "—";
+
+
+/** "9 jam", "Sel", "21 Agu" — the inbox's compact relative time. */
+export function waktuSingkat(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "baru";
+  if (mins < 60) return `${mins} mnt`;
+  if (mins < 60 * 24) return `${Math.floor(mins / 60)} jam`;
+  if (mins < 60 * 24 * 7)
+    return new Intl.DateTimeFormat("id-ID", { weekday: "short" }).format(d);
+  return new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "short" }).format(d);
+}
+
+export const jam = (iso: string) =>
+  new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(
+    new Date(iso),
+  );
+
+export const hari = (iso: string) =>
+  new Intl.DateTimeFormat("id-ID", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  })
+    .format(new Date(iso))
+    .toUpperCase();
+
+export const inisial = (name: string | null, fallback: string) =>
+  (name ?? fallback)
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0] ?? "")
+    .join("")
+    .toUpperCase() || "?";
+
+export const PRIORITAS: Record<string, { label: string; color: string }> = {
+  urgent: { label: "Mendesak", color: "#f2555a" },
+  high: { label: "Tinggi", color: "#f5a524" },
+  medium: { label: "Sedang", color: "#4f8cff" },
+  low: { label: "Rendah", color: "#6b779b" },
+};
+
+export const STATUS_ID: Record<string, string> = {
+  open: "Terbuka",
+  pending: "Menunggu",
+  held: "Ditahan",
+  snoozed: "Ditunda",
+  closed: "Selesai",
+};

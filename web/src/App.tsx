@@ -13,6 +13,13 @@ import { Webhooks } from "./pages/Webhooks";
 import { Broadcasts } from "./pages/Broadcasts";
 import { Billing } from "./pages/Billing";
 import { Overview } from "./pages/Overview";
+import { Analytics } from "./pages/Analytics";
+import { Contacts } from "./pages/Contacts";
+import { Templates } from "./pages/Templates";
+import { Settings } from "./pages/Settings";
+import { AiAgent } from "./pages/AiAgent";
+import { Ads } from "./pages/Ads";
+import { Kichat } from "./pages/Kichat";
 
 export type Session = { user: User; organizations: Org[] } | null;
 
@@ -56,6 +63,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/" element={<Landing signedIn={signedIn} />} />
+      {/* Customer-facing; deliberately outside the auth guard. */}
+      <Route path="/kichat/:token" element={<Kichat />} />
       <Route
         path="/masuk"
         element={
@@ -89,7 +98,13 @@ export function App() {
           <Route path="nomor" element={<Numbers />} />
           <Route path="api-keys" element={<Keys />} />
           <Route path="webhooks" element={<Webhooks />} />
+          <Route path="kontak" element={<Contacts />} />
+          <Route path="template" element={<Templates />} />
           <Route path="broadcast" element={<Broadcasts />} />
+          <Route path="analytics" element={<Analytics />} />
+          <Route path="ai-agent" element={<AiAgent />} />
+          <Route path="ads" element={<Ads />} />
+          <Route path="konfigurasi" element={<Settings />} />
           <Route path="tagihan" element={<Billing />} />
         </Route>
       )}

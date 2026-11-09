@@ -15,7 +15,9 @@ pub const KIND_WEBHOOK_DELIVER: &str = "webhook.deliver";
 pub const KIND_BROADCAST_RUN: &str = "broadcast.run";
 pub const KIND_TEMPLATE_SYNC: &str = "template.sync";
 pub const KIND_AI_REPLY: &str = "ai.reply";
+pub const KIND_KICHAT_NOTIFY: &str = "kichat.notify";
 pub const KIND_RETENTION_PRUNE: &str = "retention.prune";
+pub const KIND_META_LEAD_EVENT: &str = "meta.lead_event";
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Job {

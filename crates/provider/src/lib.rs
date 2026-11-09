@@ -37,12 +37,33 @@ pub trait WaProvider: Send + Sync {
 
     /// Reads the number's profile, used to confirm a connection works.
     async fn phone_number_info(&self, creds: &ProviderCreds) -> Result<PhoneNumberInfo>;
+
+    /// Reports a Click-to-WhatsApp lead milestone. Returns the provider's
+    /// reference for the accepted event.
+    async fn report_lead_event(
+        &self,
+        creds: &ProviderCreds,
+        event_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String>;
 }
 
 /// Builds the adapter named by `WA_PROVIDER` / the account's `provider` column.
 pub fn build(provider: &str, api_base: &str, api_version: &str) -> Box<dyn WaProvider> {
+    build_with(provider, api_base, api_version, None)
+}
+
+/// `conversions_path` enables CTWA lead reporting on the Meta adapter.
+pub fn build_with(
+    provider: &str,
+    api_base: &str,
+    api_version: &str,
+    conversions_path: Option<String>,
+) -> Box<dyn WaProvider> {
     match provider {
-        "meta_cloud" => Box::new(MetaCloudProvider::new(api_base, api_version)),
+        "meta_cloud" => Box::new(
+            MetaCloudProvider::new(api_base, api_version).with_conversions_path(conversions_path),
+        ),
         _ => Box::new(MockProvider::new()),
     }
 }

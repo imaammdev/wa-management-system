@@ -11,9 +11,10 @@ use crate::{quota, repo::webhooks, Error, Result};
 
 const CONTACT_COLS: &str = r#"id, org_id, customer_id, wa_id, name, profile_name, email::text as email,
     attributes, opt_in_status, blocked_at, last_seen_at, created_at"#;
-const CONV_COLS: &str = r#"id, org_id, customer_id, wa_account_id, contact_id, status, assigned_to,
-    assigned_team_id, stage_id, service_window_expires_at, ai_agent_enabled,
-    unread_count, last_message_at, last_message_preview, created_at"#;
+const CONV_COLS: &str = r#"id, org_id, customer_id, wa_account_id, contact_id, status, priority,
+    assigned_to, assigned_team_id, stage_id, last_message_direction,
+    service_window_expires_at, ai_agent_enabled, kichat_active, unread_count,
+    last_message_at, last_message_preview, created_at"#;
 const MSG_COLS: &str = r#"id, org_id, conversation_id, wa_account_id, contact_id, direction,
     wa_message_id, msg_type, body, payload, status, error_code, error_detail,
     pricing_category, source, sent_by_user_id, sent_at, delivered_at, read_at, created_at"#;
@@ -142,54 +143,168 @@ pub async fn get_or_create_conversation_tx(
     Ok(c)
 }
 
+/// Who the inbox is filtered to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Assignee {
+    Anyone,
+    Unassigned,
+    User(Uuid),
+}
+
+/// Every filter the inbox rail can apply. `bucket` is the derived view
+/// ("unread", "awaiting"); `status` is the stored lifecycle value.
+#[derive(Default)]
+pub struct ConvFilter<'a> {
+    pub status: Option<&'a str>,
+    pub bucket: Option<&'a str>,
+    pub priority: Option<&'a str>,
+    pub assignee: Option<Assignee>,
+    pub label_id: Option<Uuid>,
+    pub wa_account_id: Option<Uuid>,
+    pub search: Option<&'a str>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug, Default, serde::Serialize, sqlx::FromRow)]
+pub struct InboxCounts {
+    pub total: i64,
+    pub unread: i64,
+    pub awaiting: i64,
+    pub open: i64,
+    pub pending: i64,
+    pub held: i64,
+    pub closed: i64,
+    pub urgent: i64,
+    pub mine: i64,
+    pub unassigned: i64,
+}
+
+/// One pass over the org's conversations produces every number in the rail,
+/// so the sidebar costs a single query rather than ten.
+pub async fn inbox_counts(
+    pool: &PgPool,
+    org_id: Uuid,
+    me: Option<Uuid>,
+    wa_account_id: Option<Uuid>,
+) -> Result<InboxCounts> {
+    let c = sqlx::query_as::<_, InboxCounts>(
+        r#"
+        SELECT
+          count(*)                                                            AS total,
+          count(*) FILTER (WHERE unread_count > 0)                            AS unread,
+          count(*) FILTER (WHERE last_message_direction = 'inbound'
+                             AND status <> 'closed')                          AS awaiting,
+          count(*) FILTER (WHERE status = 'open')                             AS open,
+          count(*) FILTER (WHERE status = 'pending')                          AS pending,
+          count(*) FILTER (WHERE status = 'held')                             AS held,
+          count(*) FILTER (WHERE status = 'closed')                           AS closed,
+          count(*) FILTER (WHERE priority = 'urgent' AND status <> 'closed')  AS urgent,
+          count(*) FILTER (WHERE assigned_to = $2)                            AS mine,
+          count(*) FILTER (WHERE assigned_to IS NULL AND status <> 'closed')  AS unassigned
+        FROM conversations
+        WHERE org_id = $1 AND ($3::uuid IS NULL OR wa_account_id = $3)
+        "#,
+    )
+    .bind(org_id)
+    .bind(me)
+    .bind(wa_account_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(c)
+}
+
 pub async fn list_conversations(
     pool: &PgPool,
     org_id: Uuid,
-    status: Option<&str>,
-    assigned_to: Option<Uuid>,
-    limit: i64,
-    offset: i64,
+    f: ConvFilter<'_>,
 ) -> Result<Vec<serde_json::Value>> {
+    let (assignee_mode, assignee_id) = match f.assignee {
+        None | Some(Assignee::Anyone) => ("any", None),
+        Some(Assignee::Unassigned) => ("none", None),
+        Some(Assignee::User(id)) => ("user", Some(id)),
+    };
+
     let rows = sqlx::query_as::<_, ConvListRow>(
         r#"
-            SELECT c.id, c.status, c.assigned_to, ct.name, ct.profile_name, ct.wa_id,
-                   c.last_message_at, c.last_message_preview, c.unread_count,
-                   c.service_window_expires_at, c.wa_account_id
-            FROM conversations c
-            JOIN contacts ct ON ct.id = c.contact_id
-            WHERE c.org_id = $1
-              AND ($2::text IS NULL OR c.status = $2)
-              AND ($3::uuid IS NULL OR c.assigned_to = $3)
-            ORDER BY c.last_message_at DESC NULLS LAST
-            LIMIT $4 OFFSET $5
-            "#,
+        SELECT c.id, c.status, c.priority, c.assigned_to, u.name AS assignee_name,
+               ct.name, ct.profile_name, ct.wa_id,
+               c.last_message_at, c.last_message_preview, c.last_message_direction,
+               c.unread_count, c.service_window_expires_at, c.wa_account_id,
+               COALESCE(
+                 (SELECT json_agg(json_build_object('id', l.id, 'name', l.name, 'color', l.color))
+                  FROM conversation_labels cl
+                  JOIN labels l ON l.id = cl.label_id
+                  WHERE cl.conversation_id = c.id),
+                 '[]'::json
+               ) AS labels
+        FROM conversations c
+        JOIN contacts ct ON ct.id = c.contact_id
+        LEFT JOIN users u ON u.id = c.assigned_to
+        WHERE c.org_id = $1
+          AND ($2::text IS NULL OR c.status = $2)
+          AND ($3::text IS NULL OR c.priority = $3)
+          AND ($4::uuid IS NULL OR c.wa_account_id = $4)
+          AND (
+            $5 = 'any'
+            OR ($5 = 'none' AND c.assigned_to IS NULL)
+            OR ($5 = 'user' AND c.assigned_to = $6)
+          )
+          AND ($7::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM conversation_labels cl
+                WHERE cl.conversation_id = c.id AND cl.label_id = $7))
+          AND (
+            $8::text IS NULL
+            OR ($8 = 'unread'   AND c.unread_count > 0)
+            OR ($8 = 'awaiting' AND c.last_message_direction = 'inbound' AND c.status <> 'closed')
+            OR ($8 = 'urgent'   AND c.priority = 'urgent' AND c.status <> 'closed')
+            OR  $8 = 'all'
+          )
+          AND ($9::text IS NULL
+               OR ct.wa_id ILIKE '%'||$9||'%'
+               OR COALESCE(ct.name,'') ILIKE '%'||$9||'%'
+               OR COALESCE(ct.profile_name,'') ILIKE '%'||$9||'%'
+               OR COALESCE(c.last_message_preview,'') ILIKE '%'||$9||'%')
+        ORDER BY c.last_message_at DESC NULLS LAST
+        LIMIT $10 OFFSET $11
+        "#,
     )
     .bind(org_id)
-    .bind(status)
-    .bind(assigned_to)
-    .bind(limit.clamp(1, 100))
-    .bind(offset.max(0))
+    .bind(f.status)
+    .bind(f.priority)
+    .bind(f.wa_account_id)
+    .bind(assignee_mode)
+    .bind(assignee_id)
+    .bind(f.label_id)
+    .bind(f.bucket)
+    .bind(f.search)
+    .bind(if f.limit <= 0 { 30 } else { f.limit.min(100) })
+    .bind(f.offset.max(0))
     .fetch_all(pool)
     .await?;
 
     Ok(rows.into_iter().map(ConvListRow::into_json).collect())
 }
 
-/// The inbox list needs the contact joined onto every conversation; this is
-/// that denormalized row.
+/// The inbox list needs the contact, assignee and labels joined onto every
+/// conversation; this is that denormalized row.
 #[derive(sqlx::FromRow)]
 struct ConvListRow {
     id: Uuid,
     status: String,
+    priority: String,
     assigned_to: Option<Uuid>,
+    assignee_name: Option<String>,
     name: Option<String>,
     profile_name: Option<String>,
     wa_id: String,
     last_message_at: Option<DateTime<Utc>>,
     last_message_preview: Option<String>,
+    last_message_direction: Option<String>,
     unread_count: i32,
     service_window_expires_at: Option<DateTime<Utc>>,
     wa_account_id: Uuid,
+    labels: serde_json::Value,
 }
 
 impl ConvListRow {
@@ -197,14 +312,20 @@ impl ConvListRow {
         json!({
             "id": self.id,
             "status": self.status,
+            "priority": self.priority,
             "assigned_to": self.assigned_to,
+            "assignee_name": self.assignee_name,
             "wa_account_id": self.wa_account_id,
             "contact": {
                 "wa_id": self.wa_id,
                 "name": self.name.or(self.profile_name),
             },
+            "labels": self.labels,
             "last_message_at": self.last_message_at,
             "last_message_preview": self.last_message_preview,
+            "last_message_direction": self.last_message_direction,
+            "awaiting_reply": self.last_message_direction.as_deref() == Some("inbound")
+                && self.status != "closed",
             "unread_count": self.unread_count,
             "service_window_expires_at": self.service_window_expires_at,
             "service_window_open": self
@@ -274,7 +395,8 @@ pub async fn set_status(
     sqlx::query(
         r#"UPDATE conversations
            SET status=$3,
-               closed_at = CASE WHEN $3='closed' THEN now() ELSE NULL END,
+               closed_at   = CASE WHEN $3='closed' THEN now() ELSE NULL END,
+               resolved_at = CASE WHEN $3='closed' THEN COALESCE(resolved_at, now()) ELSE NULL END,
                updated_at=now()
            WHERE id=$1 AND org_id=$2"#,
     )
@@ -365,7 +487,12 @@ pub async fn insert_outbound(pool: &PgPool, m: NewOutbound<'_>) -> Result<Messag
 
     sqlx::query(
         r#"UPDATE conversations
-           SET last_message_at=now(), last_message_preview=$2, updated_at=now()
+           SET last_message_at = now(),
+               last_message_preview = $2,
+               last_message_direction = 'outbound',
+               -- first time an agent answers, for response-time reporting
+               first_response_at = COALESCE(first_response_at, now()),
+               updated_at = now()
            WHERE id=$1"#,
     )
     .bind(m.conversation_id)
@@ -460,6 +587,8 @@ pub struct NewInbound<'a> {
     pub body: Option<&'a str>,
     pub payload: serde_json::Value,
     pub reply_to: Option<&'a str>,
+    /// Click-to-WhatsApp referral, present only on an ad-originated message.
+    pub referral: Option<&'a serde_json::Value>,
 }
 
 /// The inbound path: upsert contact, open/refresh the conversation, store the
@@ -515,7 +644,10 @@ pub async fn record_inbound(pool: &PgPool, m: NewInbound<'_>) -> Result<Option<M
              unread_count = unread_count + 1,
              last_message_at = now(),
              last_message_preview = $3,
-             status = CASE WHEN status = 'closed' THEN 'open' ELSE status END,
+             last_message_direction = 'inbound',
+             -- a new inbound message reopens a resolved thread
+             status = CASE WHEN status IN ('closed','snoozed') THEN 'open' ELSE status END,
+             resolved_at = CASE WHEN status = 'closed' THEN NULL ELSE resolved_at END,
              updated_at = now()
            WHERE id = $1"#,
     )
@@ -526,6 +658,20 @@ pub async fn record_inbound(pool: &PgPool, m: NewInbound<'_>) -> Result<Option<M
     .await?;
 
     quota::increment(&mut tx, m.org_id, quota::METRIC_MESSAGES_RECEIVED, 1).await?;
+
+    // Attribution is part of the same transaction: a lead we can't attribute
+    // is worse than one we never stored.
+    if let Some(referral) = m.referral {
+        crate::repo::ads::record_referral_tx(
+            &mut tx,
+            m.org_id,
+            contact.id,
+            Some(conv.id),
+            Some(m.wa_account_id),
+            referral,
+        )
+        .await?;
+    }
 
     webhooks::queue_event_tx(
         &mut tx,
@@ -550,6 +696,67 @@ pub async fn record_inbound(pool: &PgPool, m: NewInbound<'_>) -> Result<Option<M
 
     tx.commit().await?;
     Ok(Some(msg))
+}
+
+/// Triage priority: urgent | high | medium | low.
+pub async fn set_priority(
+    pool: &PgPool,
+    org_id: Uuid,
+    conversation_id: Uuid,
+    priority: &str,
+) -> Result<()> {
+    if !["urgent", "high", "medium", "low"].contains(&priority) {
+        return Err(Error::validation("prioritas tidak dikenal"));
+    }
+    sqlx::query("UPDATE conversations SET priority=$3, updated_at=now() WHERE id=$1 AND org_id=$2")
+        .bind(conversation_id)
+        .bind(org_id)
+        .bind(priority)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Attaches or removes a label on a conversation.
+pub async fn set_conversation_label(
+    pool: &PgPool,
+    org_id: Uuid,
+    conversation_id: Uuid,
+    label_id: Uuid,
+    on: bool,
+) -> Result<()> {
+    // Both ids must belong to this org, or a caller could label across tenants.
+    let ok: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(
+             SELECT 1 FROM conversations c, labels l
+             WHERE c.id=$2 AND c.org_id=$1 AND l.id=$3 AND l.org_id=$1)"#,
+    )
+    .bind(org_id)
+    .bind(conversation_id)
+    .bind(label_id)
+    .fetch_one(pool)
+    .await?;
+    if !ok {
+        return Err(Error::NotFound("conversation or label"));
+    }
+
+    if on {
+        sqlx::query(
+            "INSERT INTO conversation_labels (conversation_id, label_id) VALUES ($1,$2)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(conversation_id)
+        .bind(label_id)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query("DELETE FROM conversation_labels WHERE conversation_id=$1 AND label_id=$2")
+            .bind(conversation_id)
+            .bind(label_id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

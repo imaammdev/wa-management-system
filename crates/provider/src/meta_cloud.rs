@@ -12,6 +12,9 @@ pub struct MetaCloudProvider {
     http: reqwest::Client,
     api_base: String,
     api_version: String,
+    /// Path template for lead reporting; `{waba_id}` and `{phone_number_id}`
+    /// are substituted. `None` disables the feature.
+    conversions_path: Option<String>,
 }
 
 impl MetaCloudProvider {
@@ -24,7 +27,13 @@ impl MetaCloudProvider {
             http,
             api_base: api_base.trim_end_matches('/').to_string(),
             api_version: api_version.to_string(),
+            conversions_path: None,
         }
+    }
+
+    pub fn with_conversions_path(mut self, path: Option<String>) -> Self {
+        self.conversions_path = path;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -319,6 +328,55 @@ impl WaProvider for MetaCloudProvider {
             messaging_limit_tier: b["throughput"]["level"].as_str().map(str::to_string),
         })
     }
+
+    async fn report_lead_event(
+        &self,
+        creds: &ProviderCreds,
+        event_name: &str,
+        payload: &Value,
+    ) -> Result<String> {
+        // Meta exposes lead reporting through more than one product and the
+        // path differs per enrollment, so we require it to be configured
+        // rather than guessing and silently reporting nothing.
+        let template = self
+            .conversions_path
+            .as_deref()
+            .ok_or_else(|| Error::Provider {
+                code: "not_configured".into(),
+                message: "META_CONVERSIONS_PATH belum diset — lead event tidak dikirim".into(),
+            })?;
+
+        let waba_id = creds.waba_id.as_deref().unwrap_or_default();
+        let path = template
+            .replace("{waba_id}", waba_id)
+            .replace("{phone_number_id}", &creds.phone_number_id);
+
+        let body = json!({
+            "event_name": event_name,
+            "action_source": "business_messaging",
+            "messaging_channel": "whatsapp",
+            "event_time": chrono::Utc::now().timestamp(),
+            "custom_data": payload,
+        });
+
+        let resp = self
+            .http
+            .post(self.url(&path))
+            .bearer_auth(&creds.access_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::Provider {
+                code: "network".into(),
+                message: e.to_string(),
+            })?;
+
+        if !resp.status().is_success() {
+            return Err(Self::parse_error(resp).await);
+        }
+        let b: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+        Ok(b["id"].as_str().unwrap_or("accepted").to_string())
+    }
 }
 
 // ----------------------------------------------------------- webhook parsing
@@ -381,6 +439,7 @@ pub fn parse_webhook(body: &Value) -> InboundBatch {
                     msg_type,
                     text,
                     reply_to: m["context"]["id"].as_str().map(str::to_string),
+                    referral: m.get("referral").filter(|r| r.is_object()).cloned(),
                     raw: m.clone(),
                 });
             }
@@ -475,6 +534,55 @@ mod tests {
             batch.statuses[0].pricing_category.as_deref(),
             Some("utility")
         );
+    }
+
+    #[test]
+    fn captures_click_to_whatsapp_referral() {
+        let body = json!({
+          "entry": [{
+            "changes": [{
+              "value": {
+                "metadata": { "phone_number_id": "PNID1" },
+                "messages": [{
+                  "from": "6281", "id": "wamid.CTWA", "type": "text",
+                  "text": { "body": "Saya lihat iklan ini" },
+                  "referral": {
+                    "source_url": "https://fb.me/abc",
+                    "source_id": "1203948",
+                    "source_type": "ad",
+                    "headline": "Diskon 50%",
+                    "ctwa_clid": "clid_xyz"
+                  }
+                }]
+              }
+            }]
+          }]
+        });
+        let batch = parse_webhook(&body);
+        let r = batch.messages[0]
+            .referral
+            .as_ref()
+            .expect("referral captured");
+        assert_eq!(r["source_type"], "ad");
+        assert_eq!(r["ctwa_clid"], "clid_xyz");
+    }
+
+    #[test]
+    fn ordinary_messages_have_no_referral() {
+        let body = MockProviderShim::inbound();
+        let batch = parse_webhook(&body);
+        assert!(batch.messages[0].referral.is_none());
+    }
+
+    struct MockProviderShim;
+    impl MockProviderShim {
+        fn inbound() -> Value {
+            json!({"entry":[{"changes":[{"value":{
+                "metadata": {"phone_number_id":"P"},
+                "messages":[{"from":"62811","id":"wamid.X","type":"text",
+                             "text":{"body":"halo"}}]
+            }}]}]})
+        }
     }
 
     #[test]

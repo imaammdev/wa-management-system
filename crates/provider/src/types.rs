@@ -156,6 +156,8 @@ pub struct InboundMessage {
     pub msg_type: String,
     pub text: Option<String>,
     pub reply_to: Option<String>,
+    /// Present only on the first message after a Click-to-WhatsApp ad click.
+    pub referral: Option<serde_json::Value>,
     pub raw: serde_json::Value,
 }
 

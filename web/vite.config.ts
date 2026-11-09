@@ -12,6 +12,9 @@ export default defineConfig({
       "/v1": { target: "http://127.0.0.1:8080", changeOrigin: true },
       "/public": { target: "http://127.0.0.1:8080", changeOrigin: true },
       "/healthz": { target: "http://127.0.0.1:8080", changeOrigin: true },
+      // Public Kichat API. The /kichat/:token *page* is client-routed, so only
+      // the API paths below it are proxied.
+      "^/kichat/[^/]+/(room|messages)": { target: "http://127.0.0.1:8080", changeOrigin: true },
     },
   },
 });

@@ -1,218 +1,283 @@
-import { useEffect, useRef, useState } from "react";
-import { api, waktu, type Conversation, type Message } from "../api";
-import { Empty, Err, PageHead, StatusBadge } from "../components/bits";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  api,
+  type CannedResponse,
+  type Conversation,
+  type InboxCounts,
+  type Label,
+  type Member,
+  type Message,
+  type WaAccount,
+} from "../api";
+import { ConversationList } from "../components/inbox/ConversationList";
+import { CustomerPanel } from "../components/inbox/CustomerPanel";
+import { EMPTY_FILTERS, FilterRail, type Filters } from "../components/inbox/FilterRail";
+import { Thread } from "../components/inbox/Thread";
 
-const FILTERS = [
-  { key: "open", label: "Terbuka" },
-  { key: "pending", label: "Menunggu" },
-  { key: "closed", label: "Selesai" },
-  { key: "", label: "Semua" },
-];
+/** Builds the querystring for the conversation list from the rail's state. */
+function toQuery(f: Filters, search: string, tab: "open" | "urgent") {
+  const q = new URLSearchParams();
+  // The "Mendesak" tab is a shortcut over the same filter machinery.
+  if (tab === "urgent") q.set("bucket", "urgent");
+  else {
+    if (f.status) q.set("status", f.status);
+    if (f.bucket) q.set("bucket", f.bucket);
+  }
+  if (f.priority) q.set("priority", f.priority);
+  if (f.assigned_to) q.set("assigned_to", f.assigned_to);
+  if (f.label_id) q.set("label_id", f.label_id);
+  if (f.wa_account_id) q.set("wa_account_id", f.wa_account_id);
+  if (search.trim()) q.set("search", search.trim());
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
 
 export function Inbox() {
-  const [convs, setConvs] = useState<Conversation[]>([]);
-  const [filter, setFilter] = useState("open");
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [tab, setTab] = useState<"open" | "urgent">("open");
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+
+  const [rows, setRows] = useState<Conversation[]>([]);
+  const [counts, setCounts] = useState<InboxCounts | null>(null);
+  const [numbers, setNumbers] = useState<WaAccount[]>([]);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [labels, setLabels] = useState<Label[]>([]);
+  const [canned, setCanned] = useState<CannedResponse[]>([]);
+
   const [active, setActive] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [draft, setDraft] = useState("");
+  const [cursor, setCursor] = useState(0);
+  const [showPanel, setShowPanel] = useState(true);
   const [err, setErr] = useState("");
-  const [sending, setSending] = useState(false);
-  const bodyRef = useRef<HTMLDivElement>(null);
 
-  const loadConvs = async () => {
+  // Typing in search shouldn't fire a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Reference data, loaded once.
+  useEffect(() => {
+    void Promise.all([
+      api.get<{ data: WaAccount[] }>("/api/whatsapp-accounts"),
+      api.get<{ data: Member[] }>("/api/organizations/current/members"),
+      api.get<{ data: Label[] }>("/api/contacts/labels"),
+      api.get<{ data: CannedResponse[] }>("/api/inbox/canned-responses"),
+    ])
+      .then(([n, m, l, c]) => {
+        setNumbers(n.data);
+        setMembers(m.data);
+        setLabels(l.data);
+        setCanned(c.data);
+      })
+      .catch((e) => setErr(e instanceof Error ? e.message : "Gagal memuat data."));
+  }, []);
+
+  const loadList = useCallback(async () => {
     try {
-      const q = filter ? `?status=${filter}` : "";
-      const r = await api.get<{ data: Conversation[] }>(`/api/inbox/conversations${q}`);
-      setConvs(r.data);
+      const qs = toQuery(filters, debounced, tab);
+      const countQs = filters.wa_account_id
+        ? `?wa_account_id=${filters.wa_account_id}`
+        : "";
+      const [l, c] = await Promise.all([
+        api.get<{ data: Conversation[] }>(`/api/inbox/conversations${qs}`),
+        api.get<{ counts: InboxCounts }>(`/api/inbox/counts${countQs}`),
+      ]);
+      setRows(l.data);
+      setCounts(c.counts);
+      setErr("");
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Gagal memuat percakapan.");
     }
-  };
+  }, [filters, debounced, tab]);
 
-  const loadMessages = async (id: string) => {
+  useEffect(() => {
+    void loadList();
+  }, [loadList]);
+
+  const loadMessages = useCallback(async (id: string) => {
     const r = await api.get<{ data: Message[] }>(
       `/api/inbox/conversations/${id}/messages?limit=100`,
     );
-    // API returns newest first; render oldest at the top like a chat.
     setMessages(r.data.slice().reverse());
     await api.post(`/api/inbox/conversations/${id}/read`).catch(() => {});
-  };
+  }, []);
 
-  useEffect(() => {
-    void loadConvs();
-  }, [filter]);
+  const open = useCallback(
+    async (c: Conversation) => {
+      setActive(c);
+      setMessages([]);
+      try {
+        await loadMessages(c.id);
+        await loadList();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : "Gagal memuat pesan.");
+      }
+    },
+    [loadMessages, loadList],
+  );
 
-  // Light polling keeps the inbox live without a websocket for now.
+  // Poll for new traffic; cheap enough at this cadence and avoids a socket.
+  const activeRef = useRef<Conversation | null>(null);
+  activeRef.current = active;
   useEffect(() => {
     const t = setInterval(() => {
-      void loadConvs();
-      if (active) void loadMessages(active.id).catch(() => {});
-    }, 5000);
+      void loadList();
+      const a = activeRef.current;
+      if (a) void loadMessages(a.id).catch(() => {});
+    }, 6000);
     return () => clearInterval(t);
-  }, [active, filter]);
+  }, [loadList, loadMessages]);
+
+  // ↑/↓ move the cursor, Enter opens — but never while typing in a field.
+  //
+  // The handler reads rows/cursor through refs and is bound exactly once.
+  // Depending on them directly would tear the listener down and rebuild it on
+  // every move, and a key pressed in that gap is silently dropped — which is
+  // precisely what fast repeat does.
+  const rowsRef = useRef<Conversation[]>([]);
+  const cursorRef = useRef(0);
+  const openRef = useRef(open);
+  rowsRef.current = rows;
+  cursorRef.current = cursor;
+  openRef.current = open;
 
   useEffect(() => {
-    bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
-  }, [messages]);
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName)) return;
+      const n = rowsRef.current.length;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setCursor((i) => Math.min(i + 1, Math.max(n - 1, 0)));
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setCursor((i) => Math.max(i - 1, 0));
+      } else if (e.key === "Enter") {
+        const row = rowsRef.current[cursorRef.current];
+        if (row) {
+          e.preventDefault();
+          void openRef.current(row);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
-  const open = async (c: Conversation) => {
-    setActive(c);
-    setMessages([]);
+  const act = async (fn: () => Promise<unknown>) => {
     try {
-      await loadMessages(c.id);
+      await fn();
+      await loadList();
+      if (active) {
+        const fresh = await api.get<{ conversation: Conversation }>(
+          `/api/inbox/conversations/${active.id}`,
+        );
+        setActive((a) => (a ? { ...a, ...fresh.conversation } : a));
+      }
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Gagal memuat pesan.");
+      setErr(e instanceof Error ? e.message : "Gagal memperbarui.");
     }
   };
 
-  const send = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!active || !draft.trim()) return;
-    setSending(true);
-    setErr("");
-    try {
-      await api.post(`/api/inbox/conversations/${active.id}/messages`, {
-        type: "text",
-        body: draft,
-      });
-      setDraft("");
-      await loadMessages(active.id);
-      await loadConvs();
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "Gagal mengirim.");
-    } finally {
-      setSending(false);
-    }
+  const newLabel = async () => {
+    const name = prompt("Nama label baru?");
+    if (!name) return;
+    await api.post("/api/contacts/labels", { name });
+    const l = await api.get<{ data: Label[] }>("/api/contacts/labels");
+    setLabels(l.data);
   };
 
-  const setStatus = async (status: string) => {
-    if (!active) return;
-    await api.post(`/api/inbox/conversations/${active.id}/status`, { status });
-    await loadConvs();
-  };
+  const shellClass = useMemo(
+    () => "inbox-shell" + (active && showPanel ? " show-panel" : " no-panel"),
+    [active, showPanel],
+  );
 
   return (
-    <>
-      <PageHead
-        title="Inbox"
-        sub="Satu nomor untuk seluruh tim. Balasan bebas hanya bisa dalam 24 jam setelah pelanggan menulis."
-        action={
-          <div className="toggle">
-            {FILTERS.map((f) => (
-              <button
-                key={f.key}
-                className={filter === f.key ? "on" : ""}
-                onClick={() => setFilter(f.key)}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-        }
-      />
-      <Err>{err}</Err>
-
-      {convs.length === 0 && !active ? (
-        <Empty>
-          Belum ada percakapan. Kirim pesan lewat API, atau pakai tombol
-          &ldquo;Simulasi pesan masuk&rdquo; pada nomor bertipe <code>mock</code>.
-        </Empty>
-      ) : (
-        <div className="inbox">
-          <div className="conv-list">
-            {convs.map((c) => (
-              <div
-                key={c.id}
-                className={"conv-item" + (active?.id === c.id ? " active" : "")}
-                onClick={() => void open(c)}
-              >
-                <div className="between">
-                  <span className="conv-name">
-                    {c.contact.name ?? c.contact.wa_id}
-                  </span>
-                  {c.unread_count > 0 && (
-                    <span className="badge badge-ok">{c.unread_count}</span>
-                  )}
-                </div>
-                <div className="conv-preview">{c.last_message_preview ?? "—"}</div>
-                <div className="faint" style={{ fontSize: "0.72rem", marginTop: "0.2rem" }}>
-                  {waktu(c.last_message_at)}
-                  {!c.service_window_open && " · jendela 24j tertutup"}
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="thread">
-            {!active ? (
-              <div style={{ margin: "auto", color: "var(--text-faint)" }}>
-                Pilih percakapan.
-              </div>
-            ) : (
-              <>
-                <div className="thread-head between wrap">
-                  <div>
-                    <strong>{active.contact.name ?? active.contact.wa_id}</strong>
-                    <div className="faint mono" style={{ fontSize: "0.78rem" }}>
-                      {active.contact.wa_id}
-                    </div>
-                  </div>
-                  <div className="row">
-                    <StatusBadge status={active.status} />
-                    <button className="btn btn-sm" onClick={() => void setStatus("closed")}>
-                      Tandai selesai
-                    </button>
-                  </div>
-                </div>
-
-                <div className="thread-body" ref={bodyRef}>
-                  {messages.map((m) => (
-                    <div
-                      key={m.id}
-                      className={
-                        "bubble " + (m.direction === "inbound" ? "bubble-in" : "bubble-out")
-                      }
-                    >
-                      {m.body ?? <em className="faint">[{m.msg_type}]</em>}
-                      <div className="bubble-meta">
-                        {waktu(m.created_at)}
-                        {m.direction === "outbound" && ` · ${m.status}`}
-                        {m.error_detail && ` · ${m.error_detail}`}
-                      </div>
-                    </div>
-                  ))}
-                  {messages.length === 0 && (
-                    <p className="faint" style={{ margin: "auto" }}>
-                      Belum ada pesan.
-                    </p>
-                  )}
-                </div>
-
-                {active.service_window_open ? (
-                  <form className="composer" onSubmit={send}>
-                    <input
-                      className="input"
-                      placeholder="Tulis balasan…"
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                    />
-                    <button className="btn btn-primary" disabled={sending || !draft.trim()}>
-                      {sending ? "…" : "Kirim"}
-                    </button>
-                  </form>
-                ) : (
-                  <div className="composer">
-                    <p className="hint" style={{ margin: 0 }}>
-                      Jendela layanan 24 jam sudah tertutup. Kirim template yang
-                      sudah disetujui lewat halaman Broadcast atau API.
-                    </p>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
+    <div className="inbox-page">
+      {err && (
+        <div className="alert" style={{ margin: "0.5rem" }}>
+          {err}
         </div>
       )}
-    </>
+      <div className={shellClass}>
+        <FilterRail
+          counts={counts}
+          filters={filters}
+          onChange={(f) => {
+            setFilters(f);
+            setCursor(0);
+          }}
+          numbers={numbers}
+          members={members}
+          labels={labels}
+          onNewLabel={() => void newLabel()}
+        />
+
+        <ConversationList
+          rows={rows}
+          counts={counts}
+          activeId={active?.id ?? null}
+          cursor={cursor}
+          tab={tab}
+          search={search}
+          onTab={(t) => {
+            setTab(t);
+            setCursor(0);
+          }}
+          onSearch={setSearch}
+          onOpen={(c) => void open(c)}
+        />
+
+        {active ? (
+          <Thread
+            conv={active}
+            messages={messages}
+            members={members}
+            canned={canned}
+            onReply={async (text) => {
+              await api.post(`/api/inbox/conversations/${active.id}/messages`, {
+                type: "text",
+                body: text,
+              });
+              await loadMessages(active.id);
+              await loadList();
+            }}
+            onStatus={(s) =>
+              void act(() =>
+                api.post(`/api/inbox/conversations/${active.id}/status`, { status: s }),
+              )
+            }
+            onAssign={(u) =>
+              void act(() =>
+                api.post(`/api/inbox/conversations/${active.id}/assign`, { user_id: u }),
+              )
+            }
+            onPriority={(p) =>
+              void act(() =>
+                api.post(`/api/inbox/conversations/${active.id}/priority`, { priority: p }),
+              )
+            }
+            onTogglePanel={() => setShowPanel((v) => !v)}
+          />
+        ) : (
+          <div className="thread-col">
+            <p className="faint" style={{ margin: "auto" }}>
+              Pilih percakapan, atau tekan <kbd>Enter</kbd> pada baris yang disorot.
+            </p>
+          </div>
+        )}
+
+        {active && showPanel && (
+          <CustomerPanel
+            conv={active}
+            labels={labels}
+            onClose={() => setShowPanel(false)}
+            onChanged={() => void loadList()}
+          />
+        )}
+      </div>
+    </div>
   );
 }

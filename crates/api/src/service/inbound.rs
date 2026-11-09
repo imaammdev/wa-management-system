@@ -1,7 +1,8 @@
 //! Processes a parsed Meta webhook batch into our own tables, then fans the
 //! resulting events out to the customer's webhook endpoints.
 
-use mms_core::repo::{inbox, wa, webhooks};
+use mms_core::jobs::{self, Enqueue};
+use mms_core::repo::{self, inbox, wa, webhooks};
 use mms_core::Result;
 use mms_provider::{InboundBatch, InboundMessage, InboundStatus};
 use serde_json::json;
@@ -49,12 +50,37 @@ async fn process_message(state: &AppState, m: &InboundMessage) -> Result<bool> {
             body: m.text.as_deref(),
             payload: m.raw.clone(),
             reply_to: m.reply_to.as_deref(),
+            referral: m.referral.as_ref(),
         },
     )
     .await?;
 
     // `None` means Meta re-delivered something we already have.
-    Ok(saved.is_some())
+    let Some(msg) = saved else { return Ok(false) };
+
+    // Hand off to the AI agent if the number has one enabled. Queued rather
+    // than awaited: Meta's webhook must get its 200 back promptly.
+    if let Some(agent) = repo::ai::for_account(&state.pool, acc.id).await? {
+        let _ = jobs::enqueue(
+            &state.pool,
+            Enqueue::new(
+                jobs::KIND_AI_REPLY,
+                json!({
+                    "conversation_id": msg.conversation_id,
+                    "message_id": msg.id,
+                    "agent_id": agent.id,
+                }),
+            )
+            .org(acc.org_id)
+            .at(chrono::Utc::now()
+                + chrono::Duration::seconds(agent.reply_delay_secs.max(0) as i64))
+            .max_attempts(2)
+            .dedup(format!("ai:{}", msg.id)),
+        )
+        .await;
+    }
+
+    Ok(true)
 }
 
 async fn process_status(state: &AppState, s: &InboundStatus) -> Result<bool> {
